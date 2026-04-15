@@ -9,5 +9,5 @@
     "puppeteer": "^21.6.1",
     "multer": "^1.4.5-lts.1"
   },
-  "engines": { "node": "18.x" }
+  "engines": { "node": "20.x" }
 }
