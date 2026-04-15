@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
 const multer = require('multer');
 const fs = require('fs');
 const os = require('os');
@@ -19,8 +18,34 @@ app.get('/', (req, res) => {
 });
 
 async function getBrowser() {
+  const puppeteer = require('puppeteer');
+
+  // Find Chrome executable
+  let executablePath;
+  try {
+    executablePath = puppeteer.executablePath();
+    console.log('Chrome path:', executablePath);
+  } catch(e) {
+    console.log('Could not find Chrome automatically, trying manual paths...');
+    const possiblePaths = [
+      '/opt/render/.cache/puppeteer/chrome/linux-121.0.6167.85/chrome-linux64/chrome',
+      '/opt/render/.cache/puppeteer/chrome/linux-120.0.6099.109/chrome-linux64/chrome',
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+    ];
+    for (const p of possiblePaths) {
+      if (fs.existsSync(p)) {
+        executablePath = p;
+        console.log('Found Chrome at:', p);
+        break;
+      }
+    }
+  }
+
   return puppeteer.launch({
     headless: 'new',
+    executablePath,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -30,7 +55,6 @@ async function getBrowser() {
       '--no-zygote',
       '--single-process',
       '--disable-gpu',
-      '--disable-web-security',
     ],
   });
 }

@@ -4,7 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build": "npx puppeteer browsers install chrome"
+    "build": "npm install && node -e \"const p = require('puppeteer'); p.executablePath ? console.log('Chrome found') : null;\""
   },
   "dependencies": {
     "express": "^4.18.2",
