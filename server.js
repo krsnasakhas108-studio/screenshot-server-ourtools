@@ -1,12 +1,10 @@
 const express = require('express');
 const cors = require('cors');
-const chromium = require('chrome-aws-lambda');
-const puppeteer = require('puppeteer-core');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => {
@@ -14,12 +12,23 @@ app.get('/', (req, res) => {
 });
 
 async function getBrowser() {
-  return puppeteer.launch({
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    executablePath: await chromium.executablePath,
-    headless: chromium.headless,
-  });
+  try {
+    // Try chrome-aws-lambda first
+    const chromium = require('chrome-aws-lambda');
+    const puppeteer = require('puppeteer-core');
+
+    console.log('Executable path:', await chromium.executablePath);
+
+    return await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath,
+      headless: chromium.headless,
+    });
+  } catch(e) {
+    console.error('chrome-aws-lambda failed:', e.message);
+    throw new Error('Browser unavailable: ' + e.message);
+  }
 }
 
 app.post('/screenshot', async (req, res) => {
@@ -31,18 +40,22 @@ app.post('/screenshot', async (req, res) => {
   } = req.body;
 
   if (!url) return res.status(400).json({ error: 'URL is required' });
+
   const formattedUrl = url.startsWith('http') ? url : 'https://' + url;
+  console.log('Taking screenshot of:', formattedUrl);
 
   let browser;
   try {
     browser = await getBrowser();
+    console.log('Browser launched successfully');
+
     const page = await browser.newPage();
 
     await page.setViewport({
-      width: parseInt(width),
-      height: parseInt(height),
+      width: parseInt(width) || 1280,
+      height: parseInt(height) || 800,
       deviceScaleFactor: parseInt(scale) || 1,
-      isMobile: mobile,
+      isMobile: mobile === true || mobile === 'true',
     });
 
     if (mobile) {
@@ -53,8 +66,13 @@ app.post('/screenshot', async (req, res) => {
       await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
     }
 
-    await page.goto(formattedUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    await new Promise(r => setTimeout(r, Math.min(parseInt(delay), 3000)));
+    console.log('Navigating to:', formattedUrl);
+    await page.goto(formattedUrl, {
+      waitUntil: 'networkidle2',
+      timeout: 30000
+    });
+
+    await new Promise(r => setTimeout(r, Math.min(parseInt(delay) || 1000, 3000)));
 
     if (removeAds) {
       await page.evaluate(() => {
@@ -67,23 +85,17 @@ app.post('/screenshot', async (req, res) => {
     }
 
     const screenshotOptions = {
-      type: format === 'jpg' ? 'jpeg' : format,
-      quality: format !== 'png' ? parseInt(quality) : undefined,
+      type: format === 'jpg' ? 'jpeg' : (format || 'jpeg'),
       encoding: 'base64',
-      fullPage: type === 'fullpage',
+      fullPage: type !== 'viewport',
     };
 
-    let buffer;
-    if (type === 'element' && selector) {
-      const el = await page.$(selector);
-      if (!el) {
-        await browser.close();
-        return res.status(404).json({ error: 'Element not found: ' + selector });
-      }
-      buffer = await el.screenshot(screenshotOptions);
-    } else {
-      buffer = await page.screenshot(screenshotOptions);
+    if (format !== 'png') {
+      screenshotOptions.quality = parseInt(quality) || 85;
     }
+
+    console.log('Taking screenshot with options:', screenshotOptions);
+    const buffer = await page.screenshot(screenshotOptions);
 
     const pageInfo = await page.evaluate(() => ({
       title: document.title,
@@ -92,16 +104,24 @@ app.post('/screenshot', async (req, res) => {
     }));
 
     await browser.close();
+    console.log('Screenshot successful!');
 
     res.json({
       success: true,
-      image: `data:image/${format === 'jpg' ? 'jpeg' : format};base64,${buffer}`,
-      format, pageInfo, url: formattedUrl,
+      image: `data:image/${format === 'jpg' ? 'jpeg' : (format || 'jpeg')};base64,${buffer}`,
+      format: format || 'jpeg',
+      pageInfo,
+      url: formattedUrl,
     });
 
   } catch (error) {
+    console.error('Screenshot error:', error);
     if (browser) await browser.close().catch(() => {});
-    res.status(500).json({ error: 'Screenshot failed', details: error.message });
+    res.status(500).json({
+      error: 'Screenshot failed',
+      details: error.message,
+      stack: error.stack?.split('\n').slice(0,3).join(' | ')
+    });
   }
 });
 
@@ -120,6 +140,7 @@ app.post('/multi-screenshot', async (req, res) => {
   try {
     browser = await getBrowser();
     const results = [];
+    const formattedUrl = url.startsWith('http') ? url : 'https://' + url;
 
     for (const target of targets) {
       try {
@@ -133,7 +154,6 @@ app.post('/multi-screenshot', async (req, res) => {
         if (target.mobile) {
           await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15');
         }
-        const formattedUrl = url.startsWith('http') ? url : 'https://' + url;
         await page.goto(formattedUrl, { waitUntil: 'networkidle2', timeout: 25000 });
         await new Promise(r => setTimeout(r, 1000));
 
@@ -158,14 +178,16 @@ app.post('/multi-screenshot', async (req, res) => {
 
         await page.close();
       } catch(e) {
+        console.error(`Failed ${target.name}:`, e.message);
         results.push({ name: target.name, error: e.message });
       }
     }
 
     await browser.close();
-    res.json({ success: true, results, url });
+    res.json({ success: true, results, url: formattedUrl });
 
   } catch(error) {
+    console.error('Multi screenshot error:', error);
     if (browser) await browser.close().catch(() => {});
     res.status(500).json({ error: 'Failed', details: error.message });
   }
