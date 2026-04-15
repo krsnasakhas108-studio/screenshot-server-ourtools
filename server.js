@@ -1,39 +1,38 @@
 const express = require('express');
 const cors = require('cors');
-const { execFileSync } = require('child_process');
+const puppeteer = require('puppeteer');
+const multer = require('multer');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const multer = require('multer');
+const { execSync } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'OurTools Screenshot API', version: '2.0.0' });
+  res.json({ status: 'ok', service: 'OurTools Screenshot API', version: '3.0.0' });
 });
 
 async function getBrowser() {
-  try {
-    // Try chrome-aws-lambda first
-    const chromium = require('chrome-aws-lambda');
-    const puppeteer = require('puppeteer-core');
-
-    console.log('Executable path:', await chromium.executablePath);
-
-    return await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath,
-      headless: chromium.headless,
-    });
-  } catch(e) {
-    console.error('chrome-aws-lambda failed:', e.message);
-    throw new Error('Browser unavailable: ' + e.message);
-  }
+  return puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu',
+      '--disable-web-security',
+    ],
+  });
 }
 
 app.post('/screenshot', async (req, res) => {
@@ -45,15 +44,12 @@ app.post('/screenshot', async (req, res) => {
   } = req.body;
 
   if (!url) return res.status(400).json({ error: 'URL is required' });
-
   const formattedUrl = url.startsWith('http') ? url : 'https://' + url;
-  console.log('Taking screenshot of:', formattedUrl);
+  console.log('Screenshot:', formattedUrl);
 
   let browser;
   try {
     browser = await getBrowser();
-    console.log('Browser launched successfully');
-
     const page = await browser.newPage();
 
     await page.setViewport({
@@ -71,12 +67,7 @@ app.post('/screenshot', async (req, res) => {
       await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
     }
 
-    console.log('Navigating to:', formattedUrl);
-    await page.goto(formattedUrl, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
-
+    await page.goto(formattedUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await new Promise(r => setTimeout(r, Math.min(parseInt(delay) || 1000, 3000)));
 
     if (removeAds) {
@@ -94,13 +85,16 @@ app.post('/screenshot', async (req, res) => {
       encoding: 'base64',
       fullPage: type !== 'viewport',
     };
+    if (format !== 'png') screenshotOptions.quality = parseInt(quality) || 85;
 
-    if (format !== 'png') {
-      screenshotOptions.quality = parseInt(quality) || 85;
+    let buffer;
+    if (type === 'element' && selector) {
+      const el = await page.$(selector);
+      if (!el) { await browser.close(); return res.status(404).json({ error: 'Element not found' }); }
+      buffer = await el.screenshot(screenshotOptions);
+    } else {
+      buffer = await page.screenshot(screenshotOptions);
     }
-
-    console.log('Taking screenshot with options:', screenshotOptions);
-    const buffer = await page.screenshot(screenshotOptions);
 
     const pageInfo = await page.evaluate(() => ({
       title: document.title,
@@ -109,7 +103,7 @@ app.post('/screenshot', async (req, res) => {
     }));
 
     await browser.close();
-    console.log('Screenshot successful!');
+    console.log('Screenshot success!');
 
     res.json({
       success: true,
@@ -120,13 +114,9 @@ app.post('/screenshot', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Screenshot error:', error);
     if (browser) await browser.close().catch(() => {});
-    res.status(500).json({
-      error: 'Screenshot failed',
-      details: error.message,
-      stack: error.stack?.split('\n').slice(0,3).join(' | ')
-    });
+    console.error('Error:', error.message);
+    res.status(500).json({ error: 'Screenshot failed', details: error.message });
   }
 });
 
@@ -150,120 +140,82 @@ app.post('/multi-screenshot', async (req, res) => {
     for (const target of targets) {
       try {
         const page = await browser.newPage();
-        await page.setViewport({
-          width: target.width,
-          height: target.height,
-          isMobile: target.mobile,
-          deviceScaleFactor: target.mobile ? 2 : 1,
-        });
-        if (target.mobile) {
-          await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15');
-        }
+        await page.setViewport({ width: target.width, height: target.height, isMobile: target.mobile, deviceScaleFactor: target.mobile ? 2 : 1 });
+        if (target.mobile) await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15');
         await page.goto(formattedUrl, { waitUntil: 'networkidle2', timeout: 25000 });
         await new Promise(r => setTimeout(r, 1000));
-
-        const buffer = await page.screenshot({
-          fullPage: !target.viewport,
-          type: 'jpeg',
-          quality: 80,
-          encoding: 'base64',
-        });
-
-        const dims = await page.evaluate(() => ({
-          width: document.documentElement.scrollWidth,
-          height: document.documentElement.scrollHeight,
-        }));
-
-        results.push({
-          name: target.name,
-          image: `data:image/jpeg;base64,${buffer}`,
-          width: target.width,
-          height: dims.height,
-        });
-
+        const buffer = await page.screenshot({ fullPage: !target.viewport, type: 'jpeg', quality: 80, encoding: 'base64' });
+        const dims = await page.evaluate(() => ({ width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight }));
+        results.push({ name: target.name, image: `data:image/jpeg;base64,${buffer}`, width: target.width, height: dims.height });
         await page.close();
       } catch(e) {
-        console.error(`Failed ${target.name}:`, e.message);
         results.push({ name: target.name, error: e.message });
       }
     }
 
     await browser.close();
     res.json({ success: true, results, url: formattedUrl });
-
   } catch(error) {
-    console.error('Multi screenshot error:', error);
     if (browser) await browser.close().catch(() => {});
     res.status(500).json({ error: 'Failed', details: error.message });
   }
 });
 
-// ===== PDF LOCK ENDPOINT =====
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
-});
-
-let qpdfAvailable = false;
-try {
-  execFileSync('qpdf', ['--version'], { stdio: 'ignore' });
-  qpdfAvailable = true;
-  console.log('qpdf is available');
-} catch(e) {
-  console.log('qpdf not available, will use pdf-lib fallback');
-}
-
 app.post('/lock-pdf', upload.single('pdf'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
-
+  if (!req.file) return res.status(400).json({ error: 'No PDF file' });
   const password = req.body.password;
   if (!password) return res.status(400).json({ error: 'Password required' });
 
-  // Validate password — no null bytes, reasonable length
-  if (password.length > 128 || /[\x00-\x1f]/.test(password)) {
-    return res.status(400).json({ error: 'Invalid password' });
-  }
-
   const tmpDir = os.tmpdir();
-  const inputPath = path.join(tmpDir, `input_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`);
-  const outputPath = path.join(tmpDir, `locked_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`);
+  const inputPath = path.join(tmpDir, `input_${Date.now()}.pdf`);
+  const outputPath = path.join(tmpDir, `locked_${Date.now()}.pdf`);
 
   try {
     fs.writeFileSync(inputPath, req.file.buffer);
 
-    if (qpdfAvailable) {
-      // execFileSync with array args — no shell, no injection risk
-      execFileSync('qpdf', ['--encrypt', password, password, '256', '--', inputPath, outputPath]);
+    // Try qpdf
+    let qpdfOk = false;
+    try {
+      execSync('which qpdf', { stdio: 'ignore' });
+      qpdfOk = true;
+    } catch(e) {
+      try {
+        execSync('apt-get install -y qpdf 2>/dev/null || true', { stdio: 'ignore', timeout: 30000 });
+        execSync('which qpdf', { stdio: 'ignore' });
+        qpdfOk = true;
+      } catch(e2) {}
+    }
+
+    if (qpdfOk) {
+      execSync(`qpdf --encrypt "${password}" "${password}" 256 -- "${inputPath}" "${outputPath}"`);
     } else {
-      // pdf-lib fallback (RC4-128, works in all readers)
+      // Fallback: pdf-lib
       const { PDFDocument } = require('pdf-lib');
-      const pdfDoc = await PDFDocument.load(fs.readFileSync(inputPath), { ignoreEncryption: true });
+      const pdfBytes = fs.readFileSync(inputPath);
+      const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
       const locked = await pdfDoc.save({
         userPassword: password,
-        ownerPassword: password + '_' + Math.random().toString(36).slice(2),
+        ownerPassword: password + '_owner',
       });
       fs.writeFileSync(outputPath, locked);
     }
 
     const resultBytes = fs.readFileSync(outputPath);
-    const base64 = resultBytes.toString('base64');
+    try { fs.unlinkSync(inputPath); } catch(e) {}
+    try { fs.unlinkSync(outputPath); } catch(e) {}
 
-    fs.unlinkSync(inputPath);
-    fs.unlinkSync(outputPath);
-
-    console.log('PDF locked, size:', resultBytes.length);
     res.json({
       success: true,
-      pdf: `data:application/pdf;base64,${base64}`,
+      pdf: `data:application/pdf;base64,${resultBytes.toString('base64')}`,
       size: resultBytes.length,
+      method: qpdfOk ? 'qpdf-aes256' : 'pdf-lib',
     });
 
   } catch(e) {
-    try { fs.unlinkSync(inputPath); } catch(_) {}
-    try { fs.unlinkSync(outputPath); } catch(_) {}
-    console.error('Lock PDF error:', e);
+    try { fs.unlinkSync(inputPath); } catch(err) {}
+    try { fs.unlinkSync(outputPath); } catch(err) {}
     res.status(500).json({ error: 'Failed to lock PDF', details: e.message });
   }
 });
 
-app.listen(PORT, () => console.log(`Screenshot server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
