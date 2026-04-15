@@ -1,5 +1,10 @@
 const express = require('express');
 const cors = require('cors');
+const { execFileSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -190,6 +195,74 @@ app.post('/multi-screenshot', async (req, res) => {
     console.error('Multi screenshot error:', error);
     if (browser) await browser.close().catch(() => {});
     res.status(500).json({ error: 'Failed', details: error.message });
+  }
+});
+
+// ===== PDF LOCK ENDPOINT =====
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
+
+let qpdfAvailable = false;
+try {
+  execFileSync('qpdf', ['--version'], { stdio: 'ignore' });
+  qpdfAvailable = true;
+  console.log('qpdf is available');
+} catch(e) {
+  console.log('qpdf not available, will use pdf-lib fallback');
+}
+
+app.post('/lock-pdf', upload.single('pdf'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No PDF file provided' });
+
+  const password = req.body.password;
+  if (!password) return res.status(400).json({ error: 'Password required' });
+
+  // Validate password — no null bytes, reasonable length
+  if (password.length > 128 || /[\x00-\x1f]/.test(password)) {
+    return res.status(400).json({ error: 'Invalid password' });
+  }
+
+  const tmpDir = os.tmpdir();
+  const inputPath = path.join(tmpDir, `input_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`);
+  const outputPath = path.join(tmpDir, `locked_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`);
+
+  try {
+    fs.writeFileSync(inputPath, req.file.buffer);
+
+    if (qpdfAvailable) {
+      // execFileSync with array args — no shell, no injection risk
+      execFileSync('qpdf', ['--encrypt', password, password, '256', '--', inputPath, outputPath]);
+    } else {
+      // pdf-lib fallback (RC4-128, works in all readers)
+      const { PDFDocument } = require('pdf-lib');
+      const pdfDoc = await PDFDocument.load(fs.readFileSync(inputPath), { ignoreEncryption: true });
+      const locked = await pdfDoc.save({
+        userPassword: password,
+        ownerPassword: password + '_' + Math.random().toString(36).slice(2),
+      });
+      fs.writeFileSync(outputPath, locked);
+    }
+
+    const resultBytes = fs.readFileSync(outputPath);
+    const base64 = resultBytes.toString('base64');
+
+    fs.unlinkSync(inputPath);
+    fs.unlinkSync(outputPath);
+
+    console.log('PDF locked, size:', resultBytes.length);
+    res.json({
+      success: true,
+      pdf: `data:application/pdf;base64,${base64}`,
+      size: resultBytes.length,
+    });
+
+  } catch(e) {
+    try { fs.unlinkSync(inputPath); } catch(_) {}
+    try { fs.unlinkSync(outputPath); } catch(_) {}
+    console.error('Lock PDF error:', e);
+    res.status(500).json({ error: 'Failed to lock PDF', details: e.message });
   }
 });
 
