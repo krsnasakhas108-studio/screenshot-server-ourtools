@@ -218,4 +218,17 @@ app.post('/lock-pdf', upload.single('pdf'), async (req, res) => {
   }
 });
 
+// Self-ping to prevent Render free tier from sleeping
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+setInterval(async () => {
+  try {
+    const http = require('http');
+    const https = require('https');
+    const client = SELF_URL.startsWith('https') ? https : http;
+    client.get(SELF_URL + '/', () => {
+      console.log('Keep-alive ping sent');
+    }).on('error', () => {});
+  } catch(e) {}
+}, 14 * 60 * 1000); // Every 14 minutes
+
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
